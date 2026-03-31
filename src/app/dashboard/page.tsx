@@ -5,8 +5,8 @@ import { useDispatch, useSelector } from "react-redux";
 import { useSession } from "next-auth/react";
 import { AppDispatch, RootState } from "@/store";
 import { fetchReposStart, fetchReposSuccess, fetchReposFailure } from "@/store/repoSlice";
-import { connectProjectRepository, deployProject, getUserRepos, RepositoryConnectResult } from "@/lib/api";
-import { Copy, Github, Plus, Search } from "lucide-react";
+import { deployProject, getUserRepos } from "@/lib/api";
+import { Github, Plus, Search } from "lucide-react";
 
 type SessionWithBackendToken = {
   backendToken?: string | null;
@@ -37,10 +37,6 @@ export default function Dashboard() {
   const dispatch = useDispatch<AppDispatch>();
   const { items: repos, loading, error } = useSelector((state: RootState) => state.repos);
   const [search, setSearch] = useState("");
-  const [autoDeployOnCreate, setAutoDeployOnCreate] = useState(true);
-  const [webhookSetup, setWebhookSetup] = useState<RepositoryConnectResult | null>(null);
-  const [webhookSetupError, setWebhookSetupError] = useState<string | null>(null);
-  const [copiedField, setCopiedField] = useState<"url" | "secret" | null>(null);
   const [deployingRepo, setDeployingRepo] = useState<string | null>(null);
   const [isStreaming, setIsStreaming] = useState(false);
   const [streamStatus, setStreamStatus] = useState("No active deployment stream.");
@@ -97,16 +93,6 @@ export default function Dashboard() {
     }
     setIsStreaming(false);
     setStreamStatus("Stream stopped.");
-  }
-
-  async function copyText(value: string, field: "url" | "secret") {
-    try {
-      await navigator.clipboard.writeText(value);
-      setCopiedField(field);
-      setTimeout(() => setCopiedField(null), 1500);
-    } catch {
-      setCopiedField(null);
-    }
   }
 
   function startDeployLogStream(token: string, jobName: string, queueItemId: number) {
@@ -185,35 +171,12 @@ export default function Dashboard() {
 
     try {
       setDeployingRepo(repoFullName);
-      setWebhookSetup(null);
-      setWebhookSetupError(null);
-      setCopiedField(null);
       // Generate safe app name from repo name (e.g. org/repo-name -> repo-name-org)
       const cleanName = repoFullName.replace(/[^a-zA-Z0-9]/g, '-').toLowerCase().substring(0, 30);
       const randomSuffix = Math.floor(Math.random() * 10000);
       const appName = `${cleanName}-${randomSuffix}`;
 
       const result = await deployProject(backendToken, branch, repoUrl, appName, 3000);
-
-      if (result.project?.id) {
-        try {
-          const setup = await connectProjectRepository(backendToken, result.project.id, {
-            repoProvider: "github",
-            repoUrl,
-            repoFullName,
-            branch,
-            autoDeployEnabled: autoDeployOnCreate,
-          });
-          setWebhookSetup(setup);
-        } catch (connectError: unknown) {
-          const message = connectError instanceof Error ? connectError.message : "Failed to configure webhook";
-          setWebhookSetupError(
-            `Deployment started, but webhook setup failed. You can retry from Projects page. (${message})`
-          );
-        }
-      } else {
-        setWebhookSetupError("Deployment started, but project ID is missing so webhook setup was skipped.");
-      }
 
       const queueItemId = result.queueItemId;
       const jobName = result.jenkinsJobName || "deploy-pipeline";
@@ -240,17 +203,9 @@ export default function Dashboard() {
         <div>
           <h1 className="text-2xl font-semibold tracking-tight">Let&apos;s build something new.</h1>
           <p className="text-gray-400 mt-1 text-sm">Select a repository from your GitHub account to deploy.</p>
+          <p className="text-gray-500 mt-1 text-xs">Webhook is disabled by default. Create it from the Webhooks tab when you are ready.</p>
         </div>
         <div className="flex flex-col sm:flex-row items-start sm:items-center gap-3">
-          <label className="inline-flex items-center gap-2 text-xs text-gray-300 bg-white/5 border border-white/10 rounded-md px-3 py-2">
-            <input
-              type="checkbox"
-              checked={autoDeployOnCreate}
-              onChange={(event) => setAutoDeployOnCreate(event.target.checked)}
-              className="h-3.5 w-3.5 rounded border-white/30 bg-black/40"
-            />
-            Enable auto-deploy webhook on create
-          </label>
           <button
             onClick={() => void loadRepos()}
             disabled={loading}
@@ -318,72 +273,6 @@ export default function Dashboard() {
           )}
         </div>
       </div>
-
-      {webhookSetupError ? (
-        <div className="mt-8 rounded-xl border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-300">
-          {webhookSetupError}
-        </div>
-      ) : null}
-
-      {webhookSetup ? (
-        <div className="mt-8 bg-[#111] border border-white/10 rounded-xl shadow-2xl overflow-hidden">
-          <div className="px-4 py-3 border-b border-white/10">
-            <h2 className="text-sm font-medium text-white">Webhook Setup</h2>
-            <p className="text-xs text-gray-400 mt-1">
-              {webhookSetup.webhookAutoCreated
-                ? "GitHub webhook was created automatically. New commits on the selected branch will auto-deploy."
-                : "Auto-creation was not completed. Add this webhook manually in GitHub repo settings."}
-            </p>
-          </div>
-
-          <div className="p-4 grid grid-cols-1 md:grid-cols-3 gap-3 text-xs">
-            <div className="rounded-lg border border-white/10 bg-black/30 px-3 py-2">
-              <p className="text-gray-400 mb-1">Repository</p>
-              <p className="text-white break-all">{webhookSetup.repoFullName}</p>
-            </div>
-            <div className="rounded-lg border border-white/10 bg-black/30 px-3 py-2">
-              <p className="text-gray-400 mb-1">Branch</p>
-              <p className="text-white">{webhookSetup.branch}</p>
-            </div>
-            <div className="rounded-lg border border-white/10 bg-black/30 px-3 py-2">
-              <p className="text-gray-400 mb-1">Auto Deploy</p>
-              <p className="text-white">{webhookSetup.autoDeployEnabled ? "Enabled" : "Disabled"}</p>
-            </div>
-          </div>
-
-          {!webhookSetup.webhookAutoCreated ? (
-            <div className="px-4 pb-4 space-y-3">
-              <div className="rounded-lg border border-white/10 bg-black/30 px-3 py-2">
-                <p className="text-xs text-gray-400 mb-1">Payload URL</p>
-                <div className="flex items-center gap-2">
-                  <code className="flex-1 text-[11px] text-emerald-300 break-all">{webhookSetup.webhook.url}</code>
-                  <button
-                    onClick={() => void copyText(webhookSetup.webhook.url, "url")}
-                    className="inline-flex items-center gap-1 px-2 py-1 rounded border border-white/20 bg-white/5 text-gray-200 hover:bg-white/10"
-                  >
-                    <Copy className="h-3 w-3" />
-                    {copiedField === "url" ? "Copied" : "Copy"}
-                  </button>
-                </div>
-              </div>
-
-              <div className="rounded-lg border border-white/10 bg-black/30 px-3 py-2">
-                <p className="text-xs text-gray-400 mb-1">Webhook Secret</p>
-                <div className="flex items-center gap-2">
-                  <code className="flex-1 text-[11px] text-emerald-300 break-all">{webhookSetup.webhook.secret}</code>
-                  <button
-                    onClick={() => void copyText(webhookSetup.webhook.secret, "secret")}
-                    className="inline-flex items-center gap-1 px-2 py-1 rounded border border-white/20 bg-white/5 text-gray-200 hover:bg-white/10"
-                  >
-                    <Copy className="h-3 w-3" />
-                    {copiedField === "secret" ? "Copied" : "Copy"}
-                  </button>
-                </div>
-              </div>
-            </div>
-          ) : null}
-        </div>
-      ) : null}
 
       <div className="mt-8 bg-[#111] border border-white/10 rounded-xl shadow-2xl overflow-hidden">
         <div className="px-4 py-3 border-b border-white/10 flex flex-wrap items-center justify-between gap-3">

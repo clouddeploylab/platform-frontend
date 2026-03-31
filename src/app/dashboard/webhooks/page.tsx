@@ -33,7 +33,6 @@ export default function WebhooksPage() {
   const [selectedProjectId, setSelectedProjectId] = useState<string>("");
   const [details, setDetails] = useState<WebhookDetailsResult | null>(null);
   const [webhookName, setWebhookName] = useState("");
-  const [autoDeployEnabled, setAutoDeployEnabled] = useState(true);
   const [createOnProvider, setCreateOnProvider] = useState(true);
   const [busy, setBusy] = useState<"create" | "rotate" | "delete" | null>(null);
   const [copiedField, setCopiedField] = useState<"url" | "secret" | null>(null);
@@ -72,7 +71,6 @@ export default function WebhooksPage() {
       const payload = await getProjectWebhook(backendToken, selectedProjectId);
       setDetails(payload);
       setWebhookName(payload.name || `${selectedProject?.appName || "project"}-webhook`);
-      setAutoDeployEnabled(payload.autoDeployEnabled);
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : "Failed to load webhook details";
       setError(message);
@@ -91,7 +89,6 @@ export default function WebhooksPage() {
     } else {
       setDetails(null);
       setWebhookName("");
-      setAutoDeployEnabled(true);
     }
   }, [selectedProjectId, loadWebhookDetails]);
 
@@ -119,12 +116,11 @@ export default function WebhooksPage() {
     try {
       const payload = await createProjectWebhook(backendToken, selectedProjectId, {
         name: normalizedName,
-        autoDeployEnabled,
+        autoDeployEnabled: true,
         createOnProvider,
       });
       setDetails(payload);
       setWebhookName(payload.name || normalizedName);
-      setAutoDeployEnabled(payload.autoDeployEnabled);
       setInfo(payload.webhookAutoCreated ? "Webhook created and synced to GitHub." : "Webhook created locally.");
       await loadProjects();
     } catch (err: unknown) {
@@ -235,14 +231,6 @@ export default function WebhooksPage() {
               <label className="inline-flex items-center gap-2 text-sm text-gray-300">
                 <input
                   type="checkbox"
-                  checked={autoDeployEnabled}
-                  onChange={(event) => setAutoDeployEnabled(event.target.checked)}
-                />
-                Enable Auto Deploy
-              </label>
-              <label className="inline-flex items-center gap-2 text-sm text-gray-300">
-                <input
-                  type="checkbox"
                   checked={createOnProvider}
                   onChange={(event) => setCreateOnProvider(event.target.checked)}
                 />
@@ -256,7 +244,11 @@ export default function WebhooksPage() {
                 disabled={busy !== null}
                 className="px-4 py-2 rounded border border-emerald-500/30 bg-emerald-500/10 text-emerald-300 text-sm hover:bg-emerald-500/20 disabled:opacity-50"
               >
-                {busy === "create" ? "Saving..." : "Create / Update Webhook"}
+                {busy === "create"
+                  ? "Saving..."
+                  : details?.webhookConfigured
+                    ? "Update Webhook"
+                    : "Add Webhook"}
               </button>
               <button
                 onClick={() => void handleRotateSecret()}
@@ -277,6 +269,9 @@ export default function WebhooksPage() {
 
             {error ? <p className="text-sm text-red-400">{error}</p> : null}
             {info ? <p className="text-sm text-emerald-300">{info}</p> : null}
+            <p className="text-xs text-gray-500">
+              Clicking <span className="text-gray-300">Add Webhook</span> enables auto deploy and generates webhook URL + secret.
+            </p>
 
             {details ? (
               <div className="mt-4 rounded-lg border border-white/10 bg-black/30 p-4 space-y-3">
