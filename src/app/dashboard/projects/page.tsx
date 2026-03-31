@@ -1,57 +1,327 @@
 "use client";
 
-import { useEffect } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useDispatch, useSelector } from "react-redux";
 import { useSession } from "next-auth/react";
+import Link from "next/link";
 import { AppDispatch, RootState } from "@/store";
 import { fetchProjectsStart, fetchProjectsSuccess, fetchProjectsFailure } from "@/store/projectSlice";
-import { getUserProjects } from "@/lib/api";
+import { getUserProjects, setProjectAutoDeploy, syncProjectDeploy } from "@/lib/api";
 import { ExternalLink, RefreshCw, Activity, CheckCircle2, XCircle, Clock } from "lucide-react";
+
+type SessionWithBackendToken = {
+  backendToken?: string | null;
+};
+
+type JenkinsWsMessage = {
+  type?: "open" | "queued" | "log" | "heartbeat" | "done" | "error";
+  build?: number;
+  queueItemId?: number;
+  chunk?: string;
+  message?: string;
+  detail?: string;
+};
+
+const backendBaseUrl = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8080";
+
+function buildJenkinsLogWsUrl(job: string, build: string, token: string): string {
+  const endpoint = new URL("/ws/jenkins/logs", backendBaseUrl);
+  endpoint.protocol = endpoint.protocol === "https:" ? "wss:" : "ws:";
+  endpoint.searchParams.set("job", job);
+  endpoint.searchParams.set("build", build);
+  endpoint.searchParams.set("token", token);
+  return endpoint.toString();
+}
+
+function buildJenkinsQueueWsUrl(job: string, queueItemId: number, token: string): string {
+  const endpoint = new URL("/ws/jenkins/logs", backendBaseUrl);
+  endpoint.protocol = endpoint.protocol === "https:" ? "wss:" : "ws:";
+  endpoint.searchParams.set("job", job);
+  endpoint.searchParams.set("queueItem", String(queueItemId));
+  endpoint.searchParams.set("token", token);
+  return endpoint.toString();
+}
 
 export default function Projects() {
   const { data: session, status } = useSession();
   const dispatch = useDispatch<AppDispatch>();
   const { items: projects, loading, error } = useSelector((state: RootState) => state.projects);
-  console.log("testing")
+  const [jobName, setJobName] = useState("deploy-pipeline");
+  const [buildNumber, setBuildNumber] = useState("");
+  const [syncingProjectId, setSyncingProjectId] = useState<string | null>(null);
+  const [togglingProjectId, setTogglingProjectId] = useState<string | null>(null);
+  const [isStreaming, setIsStreaming] = useState(false);
+  const [streamStatus, setStreamStatus] = useState("No active deployment stream.");
+  const [logOutput, setLogOutput] = useState("");
+  const [streamError, setStreamError] = useState<string | null>(null);
+  const [currentQueueItem, setCurrentQueueItem] = useState<number | null>(null);
+  const [currentBuildNumber, setCurrentBuildNumber] = useState<number | null>(null);
+  const streamRef = useRef<WebSocket | null>(null);
+  const logContainerRef = useRef<HTMLPreElement | null>(null);
+  const backendToken = (session as SessionWithBackendToken | null)?.backendToken ?? null;
 
-  useEffect(() => {
-    if (status === "authenticated") {
-      loadProjects();
-      
-      // Auto refresh every 10 seconds to update building status
-      const interval = setInterval(loadProjects, 10000);
-      return () => clearInterval(interval);
+  const loadProjects = useCallback(async () => {
+    if (!backendToken) {
+      return;
     }
-  }, [status, session]);
-
-  async function loadProjects() {
-    if (!session || !(session as any).backendToken) return;
-    const token = (session as any).backendToken as string;
 
     dispatch(fetchProjectsStart());
     try {
-      const data = await getUserProjects(token);
+      const data = await getUserProjects(backendToken);
       dispatch(fetchProjectsSuccess(data));
-    } catch (err: any) {
-      dispatch(fetchProjectsFailure(err.message));
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : "Failed to load deployments";
+      dispatch(fetchProjectsFailure(message));
+    }
+  }, [backendToken, dispatch]);
+
+  useEffect(() => {
+    if (status === "authenticated") {
+      void loadProjects();
+    }
+  }, [status, loadProjects]);
+
+  useEffect(() => {
+    return () => {
+      if (streamRef.current) {
+        streamRef.current.close(1000, "Page cleanup");
+        streamRef.current = null;
+      }
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!logContainerRef.current) {
+      return;
+    }
+    logContainerRef.current.scrollTop = logContainerRef.current.scrollHeight;
+  }, [logOutput]);
+
+  function stopStreaming() {
+    if (streamRef.current) {
+      streamRef.current.close(1000, "Manual stop");
+      streamRef.current = null;
+    }
+    setIsStreaming(false);
+    setStreamStatus("Stream stopped.");
+  }
+
+  function startStreaming() {
+    const normalizedJob = jobName.trim();
+    const normalizedBuild = buildNumber.trim();
+
+    if (!normalizedJob) {
+      setStreamError("Jenkins job is required.");
+      return;
+    }
+
+    if (!/^\d+$/.test(normalizedBuild)) {
+      setStreamError("Build number must be a numeric value.");
+      return;
+    }
+
+    if (!backendToken) {
+      setStreamError("Missing backend token. Please sign in again.");
+      return;
+    }
+
+    stopStreaming();
+    setLogOutput("");
+    setStreamError(null);
+    setIsStreaming(true);
+    setCurrentQueueItem(null);
+    setCurrentBuildNumber(Number(normalizedBuild));
+    setStreamStatus(`Streaming Jenkins build #${normalizedBuild}...`);
+
+    const socket = new WebSocket(buildJenkinsLogWsUrl(normalizedJob, normalizedBuild, backendToken));
+    streamRef.current = socket;
+
+    socket.onmessage = (event: MessageEvent<string>) => {
+      try {
+        const message = JSON.parse(event.data) as JenkinsWsMessage;
+        switch (message.type) {
+          case "queued":
+            setStreamStatus(message.message || "Waiting in Jenkins queue...");
+            if (typeof message.queueItemId === "number") {
+              setCurrentQueueItem(message.queueItemId);
+            }
+            return;
+          case "open":
+            if (typeof message.build === "number") {
+              setCurrentBuildNumber(message.build);
+              setStreamStatus(`Streaming Jenkins build #${message.build}`);
+            } else {
+              setStreamStatus("Streaming Jenkins logs...");
+            }
+            return;
+          case "log":
+            setLogOutput((prev) => prev + (message.chunk || ""));
+            return;
+          case "error":
+            setStreamError(message.detail || message.message || "WebSocket stream error.");
+            setIsStreaming(false);
+            setStreamStatus("Stream failed.");
+            return;
+          case "done":
+            setIsStreaming(false);
+            setStreamStatus("Build completed.");
+            socket.close(1000, "Log stream completed");
+            return;
+          default:
+            return;
+        }
+      } catch {
+        setLogOutput((prev) => prev + event.data);
+      }
+    };
+
+    socket.onclose = () => {
+      if (streamRef.current === socket) {
+        streamRef.current = null;
+      }
+      setIsStreaming(false);
+    };
+
+    socket.onerror = () => {
+      setStreamError("WebSocket stream failed. Verify backend URL, token, and Jenkins job/build.");
+    };
+  }
+
+  function startQueueStreaming(job: string, queueItemId: number) {
+    if (!backendToken) {
+      setStreamError("Missing backend token. Please sign in again.");
+      return;
+    }
+
+    stopStreaming();
+    setLogOutput("");
+    setStreamError(null);
+    setIsStreaming(true);
+    setCurrentQueueItem(queueItemId);
+    setCurrentBuildNumber(null);
+    setStreamStatus(`Deployment queued (#${queueItemId}). Waiting for Jenkins build...`);
+
+    const socket = new WebSocket(buildJenkinsQueueWsUrl(job, queueItemId, backendToken));
+    streamRef.current = socket;
+
+    socket.onmessage = (event: MessageEvent<string>) => {
+      try {
+        const message = JSON.parse(event.data) as JenkinsWsMessage;
+        switch (message.type) {
+          case "queued":
+            setStreamStatus(message.message || "Still waiting in Jenkins queue...");
+            if (typeof message.queueItemId === "number") {
+              setCurrentQueueItem(message.queueItemId);
+            }
+            return;
+          case "open":
+            if (typeof message.build === "number") {
+              setCurrentBuildNumber(message.build);
+              setStreamStatus(`Streaming Jenkins build #${message.build}`);
+            } else {
+              setStreamStatus("Streaming Jenkins logs...");
+            }
+            return;
+          case "log":
+            setLogOutput((prev) => prev + (message.chunk || ""));
+            return;
+          case "error":
+            setStreamError(message.detail || message.message || "WebSocket stream error.");
+            setIsStreaming(false);
+            setStreamStatus("Stream failed.");
+            return;
+          case "done":
+            setIsStreaming(false);
+            setStreamStatus("Build completed.");
+            socket.close(1000, "Log stream completed");
+            return;
+          default:
+            return;
+        }
+      } catch {
+        setLogOutput((prev) => prev + event.data);
+      }
+    };
+
+    socket.onclose = () => {
+      if (streamRef.current === socket) {
+        streamRef.current = null;
+      }
+      setIsStreaming(false);
+    };
+
+    socket.onerror = () => {
+      setStreamError("WebSocket stream failed. Verify backend URL, token, and Jenkins queue item.");
+      setStreamStatus("Stream failed.");
+    };
+  }
+
+  async function handleToggleAutoDeploy(projectId: string, nextEnabled: boolean) {
+    if (!backendToken) {
+      alert("Missing backend token. Please sign in again.");
+      return;
+    }
+
+    try {
+      setTogglingProjectId(projectId);
+      await setProjectAutoDeploy(backendToken, projectId, nextEnabled);
+      await loadProjects();
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : "Failed to update auto deploy";
+      alert(message);
+    } finally {
+      setTogglingProjectId(null);
+    }
+  }
+
+  async function handleSyncProject(projectId: string) {
+    if (!backendToken) {
+      alert("Missing backend token. Please sign in again.");
+      return;
+    }
+
+    try {
+      setSyncingProjectId(projectId);
+      const result = await syncProjectDeploy(backendToken, projectId);
+      await loadProjects();
+
+      if (result.queueItemId && result.queueItemId > 0) {
+        startQueueStreaming(result.jobName || jobName, result.queueItemId);
+      } else {
+        setStreamError("Sync started, but queue item ID is missing.");
+        setStreamStatus("Sync started without queue item.");
+      }
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : "Failed to sync project";
+      alert(message);
+    } finally {
+      setSyncingProjectId(null);
     }
   }
 
   const getStatusIcon = (status: string) => {
     switch (status) {
-      case "BUILDING": return <RefreshCw className="h-4 w-4 animate-spin text-blue-400" />;
-      case "DEPLOYED": return <CheckCircle2 className="h-4 w-4 text-emerald-400" />;
-      case "FAILED": return <XCircle className="h-4 w-4 text-red-400" />;
-      default: return <Clock className="h-4 w-4 text-gray-400" />;
+      case "BUILDING":
+        return <RefreshCw className="h-4 w-4 animate-spin text-blue-400" />;
+      case "DEPLOYED":
+        return <CheckCircle2 className="h-4 w-4 text-emerald-400" />;
+      case "FAILED":
+        return <XCircle className="h-4 w-4 text-red-400" />;
+      default:
+        return <Clock className="h-4 w-4 text-gray-400" />;
     }
   };
 
   const getStatusBg = (status: string) => {
     switch (status) {
-      case "BUILDING": return "bg-blue-500/10 text-blue-400 border-blue-500/20";
-      case "DEPLOYED": return "bg-emerald-500/10 text-emerald-400 border-emerald-500/20";
-      case "FAILED": return "bg-red-500/10 text-red-400 border-red-500/20";
-      default: return "bg-gray-500/10 text-gray-400 border-gray-500/20";
+      case "BUILDING":
+        return "bg-blue-500/10 text-blue-400 border-blue-500/20";
+      case "DEPLOYED":
+        return "bg-emerald-500/10 text-emerald-400 border-emerald-500/20";
+      case "FAILED":
+        return "bg-red-500/10 text-red-400 border-red-500/20";
+      default:
+        return "bg-gray-500/10 text-gray-400 border-gray-500/20";
     }
   };
 
@@ -62,7 +332,7 @@ export default function Projects() {
           <h1 className="text-2xl font-semibold tracking-tight">Deployments</h1>
           <p className="text-gray-400 mt-1 text-sm">Monitor your active applications and their build status.</p>
         </div>
-        <button 
+        <button
           onClick={loadProjects}
           disabled={loading}
           className="flex items-center gap-2 px-4 py-2 bg-white/5 border border-white/10 rounded-md text-sm hover:bg-white/10 transition-colors"
@@ -89,23 +359,46 @@ export default function Projects() {
                   <th scope="col" className="px-6 py-4 font-medium">Application</th>
                   <th scope="col" className="px-6 py-4 font-medium">Source Repo</th>
                   <th scope="col" className="px-6 py-4 font-medium text-center">Branch</th>
+                  <th scope="col" className="px-6 py-4 font-medium text-center">Auto Deploy</th>
                   <th scope="col" className="px-6 py-4 font-medium text-center">Status</th>
-                  <th scope="col" className="px-6 py-4 font-medium text-right">URL</th>
+                  <th scope="col" className="px-6 py-4 font-medium text-right">Actions</th>
                 </tr>
               </thead>
               <tbody>
                 {projects.map((project) => (
                   <tr key={project.id} className="border-b border-white/5 hover:bg-white/[0.02] transition-colors">
                     <td className="px-6 py-4 font-medium text-white whitespace-nowrap">
-                      {project.appName}
+                      <Link
+                        href={`/dashboard/projects/${project.id}`}
+                        className="hover:text-emerald-300 transition-colors"
+                      >
+                        {project.appName}
+                      </Link>
                     </td>
                     <td className="px-6 py-4 truncate max-w-[200px]" title={project.repoUrl}>
-                      {project.repoUrl.replace("https://github.com/", "")}
+                      {project.repoFullName || project.repoUrl.replace("https://github.com/", "")}
                     </td>
                     <td className="px-6 py-4 text-center">
                       <span className="bg-white/5 border border-white/10 px-2 py-1 rounded text-xs font-mono">
                         {project.branch}
                       </span>
+                    </td>
+                    <td className="px-6 py-4 text-center">
+                      <button
+                        onClick={() => void handleToggleAutoDeploy(project.id, !project.autoDeployEnabled)}
+                        disabled={togglingProjectId === project.id}
+                        className={`px-2.5 py-1 rounded-full border text-xs font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed ${
+                          project.autoDeployEnabled
+                            ? "bg-emerald-500/10 text-emerald-300 border-emerald-500/20 hover:bg-emerald-500/20"
+                            : "bg-gray-500/10 text-gray-300 border-gray-500/20 hover:bg-gray-500/20"
+                        }`}
+                      >
+                        {togglingProjectId === project.id
+                          ? "Saving..."
+                          : project.autoDeployEnabled
+                            ? "Enabled"
+                            : "Disabled"}
+                      </button>
                     </td>
                     <td className="px-6 py-4">
                       <div className="flex justify-center">
@@ -116,18 +409,33 @@ export default function Projects() {
                       </div>
                     </td>
                     <td className="px-6 py-4 text-right">
-                      {project.status === "DEPLOYED" ? (
-                        <a 
-                          href={project.url} 
-                          target="_blank" 
-                          rel="noopener noreferrer"
-                          className="inline-flex items-center gap-1 text-emerald-400 hover:text-emerald-300 hover:underline transition-colors"
+                      <div className="inline-flex items-center gap-2">
+                        <button
+                          onClick={() => void handleSyncProject(project.id)}
+                          disabled={syncingProjectId === project.id}
+                          className="px-3 py-1.5 rounded border border-blue-500/30 bg-blue-500/10 text-blue-300 hover:bg-blue-500/20 text-xs disabled:opacity-50 disabled:cursor-not-allowed"
                         >
-                          Visit <ExternalLink className="h-3 w-3" />
-                        </a>
-                      ) : (
-                        <span className="text-gray-600">—</span>
-                      )}
+                          {syncingProjectId === project.id ? "Syncing..." : "Sync Deploy"}
+                        </button>
+                        <Link
+                          href={`/dashboard/projects/${project.id}`}
+                          className="px-3 py-1.5 rounded border border-white/20 bg-white/5 text-gray-200 hover:bg-white/10 text-xs"
+                        >
+                          Config
+                        </Link>
+                        {project.status === "DEPLOYED" ? (
+                          <a
+                            href={project.url}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="inline-flex items-center gap-1 text-emerald-400 hover:text-emerald-300 hover:underline transition-colors text-xs"
+                          >
+                            Visit <ExternalLink className="h-3 w-3" />
+                          </a>
+                        ) : (
+                          <span className="text-gray-600 text-xs">—</span>
+                        )}
+                      </div>
                     </td>
                   </tr>
                 ))}
@@ -135,6 +443,62 @@ export default function Projects() {
             </table>
           </div>
         )}
+      </div>
+
+      <div className="mt-8 bg-[#111] border border-white/10 rounded-xl shadow-2xl overflow-hidden">
+        <div className="px-6 py-4 border-b border-white/10 flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <h2 className="text-lg font-semibold text-white">Jenkins Live Logs</h2>
+            <p className="text-sm text-gray-400 mt-1">{streamStatus}</p>
+          </div>
+          <div className="flex items-center gap-2 text-xs text-gray-400">
+            {currentQueueItem ? <span className="bg-white/5 border border-white/10 rounded px-2 py-1">Queue: {currentQueueItem}</span> : null}
+            {currentBuildNumber ? <span className="bg-white/5 border border-white/10 rounded px-2 py-1">Build: {currentBuildNumber}</span> : null}
+          </div>
+        </div>
+
+        <div className="p-6">
+          <div className="grid grid-cols-1 md:grid-cols-[minmax(0,1fr)_180px_auto_auto] gap-3">
+            <input
+              value={jobName}
+              onChange={(e) => setJobName(e.target.value)}
+              placeholder="Jenkins job (ex: deploy-pipeline)"
+              className="w-full px-3 py-2 rounded-md bg-black/30 border border-white/15 text-sm text-white focus:outline-none focus:ring-2 focus:ring-blue-500/50"
+            />
+            <input
+              value={buildNumber}
+              onChange={(e) => setBuildNumber(e.target.value)}
+              placeholder="Build number"
+              inputMode="numeric"
+              className="w-full px-3 py-2 rounded-md bg-black/30 border border-white/15 text-sm text-white focus:outline-none focus:ring-2 focus:ring-blue-500/50"
+            />
+            <button
+              onClick={startStreaming}
+              disabled={isStreaming}
+              className="px-4 py-2 rounded-md text-sm border border-blue-500/30 bg-blue-500/10 text-blue-300 hover:bg-blue-500/20 disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              {isStreaming ? "Streaming..." : "Start Stream"}
+            </button>
+            <button
+              onClick={stopStreaming}
+              disabled={!isStreaming}
+              className="px-4 py-2 rounded-md text-sm border border-white/20 bg-white/5 text-gray-200 hover:bg-white/10 disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              Stop
+            </button>
+          </div>
+
+          {streamError ? (
+            <p className="mt-3 text-sm text-red-400">{streamError}</p>
+          ) : null}
+
+          <pre
+            ref={logContainerRef}
+            className="mt-4 h-80 rounded-lg border border-white/10 bg-black/50 p-4 text-xs leading-5 text-emerald-300 font-mono whitespace-pre-wrap overflow-y-auto"
+          >
+            {logOutput || "No logs yet. Start the stream to watch Jenkins output in real time."}
+          </pre>
+        </div>
       </div>
     </div>
   );

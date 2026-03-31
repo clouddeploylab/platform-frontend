@@ -4,11 +4,17 @@ export interface Project {
   id: string;
   appName: string;
   repoUrl: string;
+  workspaceId?: string;
+  repoProvider?: string;
+  repoFullName?: string | null;
+  webhookName?: string | null;
+  webhookProviderId?: string | null;
   branch: string;
   framework: string;
   status: string; // BUILDING, DEPLOYED, FAILED
   url: string;
   appPort: number;
+  autoDeployEnabled?: boolean;
 }
 
 interface ProjectState {

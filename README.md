@@ -1,36 +1,67 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Monolotic App Frontend
 
-## Getting Started
+Next.js dashboard for authentication, repository browsing, deployment triggering, and real-time Jenkins build logs.
 
-First, run the development server:
+## Tech stack
+
+- Next.js 16 (App Router)
+- React 19
+- NextAuth (GitHub OAuth)
+- Redux Toolkit
+
+## Clone and run
+
+1. Clone and enter the project:
+
+```bash
+git clone <your-frontend-repo-url>
+cd monolotic-app-frontend
+```
+
+2. Install dependencies:
+
+```bash
+npm install
+```
+
+3. Create `.env.local`:
+
+```bash
+NEXTAUTH_URL=http://localhost:3000
+NEXTAUTH_SECRET=<random-secret>
+GITHUB_CLIENT_ID=<github-oauth-client-id>
+GITHUB_CLIENT_SECRET=<github-oauth-client-secret>
+
+# Backend API URL (same value for both is recommended in local)
+BACKEND_URL=http://localhost:8080
+NEXT_PUBLIC_API_URL=http://localhost:8080
+```
+
+4. Run the frontend:
 
 ```bash
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Open `http://localhost:3000`.
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+## How to use
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+1. Sign in with GitHub.
+2. Open Dashboard and click `Deploy` on any repository.
+3. The page will auto-start Jenkins log streaming in the same screen.
+4. Use the Deployments page for deployment status and manual stream controls.
 
-## Learn More
+## Run checks
 
-To learn more about Next.js, take a look at the following resources:
+```bash
+npm run lint
+npm run build
+```
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+## Notes for new contributors
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
-
-## Deploy on Vercel
-
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
-
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+- Deploy flow depends on backend response fields: `queueItemId`, `queueUrl`, and `jenkinsJobName`.
+- Live log streaming uses backend WebSocket endpoint:
+  - `ws://localhost:8080/ws/jenkins/logs?job=<job>&queueItem=<id>&token=<backend-jwt>`
+- Browser WebSocket cannot send `Authorization` headers directly, so JWT is passed in query during handshake.
