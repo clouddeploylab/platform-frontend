@@ -66,6 +66,7 @@ export interface WebhookDetailsResult {
 
 export interface WebhookCreatePayload {
   name: string;
+  branch?: string;
   autoDeployEnabled?: boolean;
   createOnProvider?: boolean;
 }
@@ -126,6 +127,12 @@ async function fetchWithAuth(url: string, token: string, options: RequestInit = 
 export async function getUserRepos(token: string) {
   const res = await fetchWithAuth("/api/v1/repos", token);
   return res.json();
+}
+
+export async function getRepoBranches(token: string, repoFullName: string) {
+  const params = new URLSearchParams({ repoFullName });
+  const res = await fetchWithAuth(`/api/v1/repos/branches?${params.toString()}`, token);
+  return res.json() as Promise<string[]>;
 }
 
 export async function getUserProjects(token: string) {

@@ -6,6 +6,7 @@ import {
   createProjectWebhook,
   deleteProjectWebhook,
   getProjectWebhook,
+  getRepoBranches,
   getUserProjects,
   rotateProjectWebhook,
   WebhookDetailsResult,
@@ -33,6 +34,9 @@ export default function WebhooksPage() {
   const [selectedProjectId, setSelectedProjectId] = useState<string>("");
   const [details, setDetails] = useState<WebhookDetailsResult | null>(null);
   const [webhookName, setWebhookName] = useState("");
+  const [webhookBranch, setWebhookBranch] = useState("");
+  const [availableBranches, setAvailableBranches] = useState<string[]>([]);
+  const [branchesLoading, setBranchesLoading] = useState(false);
   const [createOnProvider, setCreateOnProvider] = useState(true);
   const [busy, setBusy] = useState<"create" | "rotate" | "delete" | null>(null);
   const [copiedField, setCopiedField] = useState<"url" | "secret" | null>(null);
@@ -43,6 +47,25 @@ export default function WebhooksPage() {
     () => projects.find((item) => item.id === selectedProjectId) || null,
     [projects, selectedProjectId]
   );
+
+  const selectedRepoFullName = useMemo(() => {
+    if (!selectedProject) return "";
+    if (selectedProject.repoFullName && selectedProject.repoFullName.trim()) {
+      return selectedProject.repoFullName.trim();
+    }
+
+    const repoUrl = selectedProject.repoUrl?.trim() || "";
+    const httpsMatch = repoUrl.match(/^https?:\/\/github\.com\/([^/]+)\/([^/.]+)(?:\.git)?\/?$/i);
+    if (httpsMatch) {
+      return `${httpsMatch[1]}/${httpsMatch[2]}`;
+    }
+
+    const sshMatch = repoUrl.match(/^git@github\.com:([^/]+)\/([^/.]+)(?:\.git)?$/i);
+    if (sshMatch) {
+      return `${sshMatch[1]}/${sshMatch[2]}`;
+    }
+    return "";
+  }, [selectedProject]);
 
   const loadProjects = useCallback(async () => {
     if (!backendToken) return;
@@ -71,11 +94,42 @@ export default function WebhooksPage() {
       const payload = await getProjectWebhook(backendToken, selectedProjectId);
       setDetails(payload);
       setWebhookName(payload.name || `${selectedProject?.appName || "project"}-webhook`);
+      setWebhookBranch(payload.branch || selectedProject?.branch || "");
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : "Failed to load webhook details";
       setError(message);
     }
-  }, [backendToken, selectedProjectId, selectedProject?.appName]);
+  }, [backendToken, selectedProjectId, selectedProject?.appName, selectedProject?.branch]);
+
+  const loadRepoBranches = useCallback(async () => {
+    if (!backendToken || !selectedRepoFullName) {
+      setAvailableBranches([]);
+      return;
+    }
+
+    setBranchesLoading(true);
+    try {
+      const payload = await getRepoBranches(backendToken, selectedRepoFullName);
+      const uniqueBranches = Array.from(
+        new Set(payload.map((branch) => branch.trim()).filter((branch) => branch.length > 0))
+      );
+      setAvailableBranches(uniqueBranches);
+
+      if (uniqueBranches.length > 0) {
+        setWebhookBranch((current) => {
+          const value = current.trim();
+          if (value) return value;
+          return uniqueBranches[0];
+        });
+      }
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : "Failed to load repo branches";
+      setError(message);
+      setAvailableBranches([]);
+    } finally {
+      setBranchesLoading(false);
+    }
+  }, [backendToken, selectedRepoFullName]);
 
   useEffect(() => {
     if (status === "authenticated") {
@@ -86,11 +140,14 @@ export default function WebhooksPage() {
   useEffect(() => {
     if (selectedProjectId) {
       void loadWebhookDetails();
+      void loadRepoBranches();
     } else {
       setDetails(null);
       setWebhookName("");
+      setWebhookBranch("");
+      setAvailableBranches([]);
     }
-  }, [selectedProjectId, loadWebhookDetails]);
+  }, [selectedProjectId, loadWebhookDetails, loadRepoBranches]);
 
   async function copyText(value: string, field: "url" | "secret") {
     try {
@@ -105,8 +162,13 @@ export default function WebhooksPage() {
   async function handleCreateWebhook() {
     if (!backendToken || !selectedProjectId) return;
     const normalizedName = webhookName.trim();
+    const normalizedBranch = webhookBranch.trim();
     if (!normalizedName) {
       setError("Webhook name is required.");
+      return;
+    }
+    if (!normalizedBranch) {
+      setError("Deploy branch is required.");
       return;
     }
 
@@ -116,11 +178,13 @@ export default function WebhooksPage() {
     try {
       const payload = await createProjectWebhook(backendToken, selectedProjectId, {
         name: normalizedName,
+        branch: normalizedBranch,
         autoDeployEnabled: true,
         createOnProvider,
       });
       setDetails(payload);
       setWebhookName(payload.name || normalizedName);
+      setWebhookBranch(payload.branch || normalizedBranch);
       setInfo(payload.webhookAutoCreated ? "Webhook created and synced to GitHub." : "Webhook created locally.");
       await loadProjects();
     } catch (err: unknown) {
@@ -212,7 +276,7 @@ export default function WebhooksPage() {
               {selectedProject.repoFullName || selectedProject.repoUrl}
             </p>
             <p className="text-sm text-gray-300 mt-1">
-              <span className="text-gray-500">Branch:</span> {selectedProject.branch}
+              <span className="text-gray-500">Current deploy branch:</span> {details?.branch || webhookBranch || selectedProject.branch}
             </p>
           </div>
 
@@ -225,6 +289,40 @@ export default function WebhooksPage() {
                 placeholder="my-project-webhook"
                 className="w-full bg-black/30 border border-white/15 rounded-md px-3 py-2 text-sm text-white"
               />
+            </div>
+
+            <div>
+              <label className="block text-xs text-gray-400 mb-2">Deploy Branch</label>
+              {branchesLoading ? (
+                <div className="w-full bg-black/30 border border-white/15 rounded-md px-3 py-2 text-sm text-gray-400">
+                  Loading branches...
+                </div>
+              ) : availableBranches.length > 0 ? (
+                <select
+                  value={webhookBranch}
+                  onChange={(event) => setWebhookBranch(event.target.value)}
+                  className="w-full bg-black/30 border border-white/15 rounded-md px-3 py-2 text-sm text-white"
+                >
+                  {webhookBranch && !availableBranches.includes(webhookBranch) ? (
+                    <option value={webhookBranch}>{webhookBranch}</option>
+                  ) : null}
+                  {availableBranches.map((branchName) => (
+                    <option key={branchName} value={branchName}>
+                      {branchName}
+                    </option>
+                  ))}
+                </select>
+              ) : (
+                <input
+                  value={webhookBranch}
+                  onChange={(event) => setWebhookBranch(event.target.value)}
+                  placeholder="deploy"
+                  className="w-full bg-black/30 border border-white/15 rounded-md px-3 py-2 text-sm text-white"
+                />
+              )}
+              <p className="text-xs text-gray-500 mt-1">
+                Auto deploy will run only for pushes to this branch.
+              </p>
             </div>
 
             <div className="flex flex-col md:flex-row gap-3">
