@@ -15,13 +15,21 @@ import {
   syncProjectDeploy,
   WebhookDetailsResult,
 } from "@/lib/api";
-import { Copy, ExternalLink, RefreshCw, Settings2, Webhook } from "lucide-react";
+import { CheckCircle2, Copy, ExternalLink, RefreshCw, Settings2, Webhook } from "lucide-react";
 
 type SessionWithBackendToken = {
   backendToken?: string | null;
 };
 
 type TabKey = "overview" | "config" | "webhook";
+
+type DeploymentNotice = {
+  appName: string;
+  title: string;
+  message: string;
+  url: string;
+  variant: "info" | "success";
+};
 
 export default function ProjectDetailsPage() {
   const { data: session } = useSession();
@@ -42,6 +50,7 @@ export default function ProjectDetailsPage() {
   const [copiedField, setCopiedField] = useState<"url" | "secret" | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [info, setInfo] = useState<string | null>(null);
+  const [deploymentNotice, setDeploymentNotice] = useState<DeploymentNotice | null>(null);
 
   const autoDeployEnabled = webhook?.autoDeployEnabled ?? project?.autoDeployEnabled ?? false;
 
@@ -72,9 +81,11 @@ export default function ProjectDetailsPage() {
       setProject(projectPayload);
       setWebhook(webhookPayload);
       setWebhookName(webhookPayload.name || `${projectPayload.appName}-webhook`);
+      return projectPayload;
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : "Failed to load project details";
       setError(message);
+      return null;
     } finally {
       setLoading(false);
     }
@@ -83,6 +94,23 @@ export default function ProjectDetailsPage() {
   useEffect(() => {
     void loadProject();
   }, [loadProject]);
+
+  useEffect(() => {
+    if (project?.url) {
+      setDeploymentNotice({
+        appName: project.appName,
+        title: project.status === "DEPLOYED" ? `${project.appName} is live` : `${project.appName} domain ready`,
+        message:
+          project.status === "DEPLOYED"
+            ? "Deployment is live. Open the domain below to access it."
+            : "This is the live domain for the app. Keep it handy while the pipeline finishes.",
+        url: project.url,
+        variant: project.status === "DEPLOYED" ? "success" : "info",
+      });
+    } else {
+      setDeploymentNotice(null);
+    }
+  }, [project]);
 
   async function copyText(value: string, field: "url" | "secret") {
     try {
@@ -106,7 +134,22 @@ export default function ProjectDetailsPage() {
           ? `Sync accepted. Queue item #${syncResult.queueItemId}`
           : "Sync accepted. Jenkins queue item not available."
       );
-      await loadProject();
+      const refreshedProject = await loadProject();
+      if (refreshedProject?.url) {
+        setDeploymentNotice({
+          appName: refreshedProject.appName,
+          title:
+            refreshedProject.status === "DEPLOYED"
+              ? `${refreshedProject.appName} is live`
+              : `${refreshedProject.appName} domain ready`,
+          message:
+            refreshedProject.status === "DEPLOYED"
+              ? "Deployment completed successfully. Open the domain below."
+              : "Deployment triggered. Use the domain below once the pipeline completes.",
+          url: refreshedProject.url,
+          variant: refreshedProject.status === "DEPLOYED" ? "success" : "info",
+        });
+      }
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : "Failed to sync project";
       setError(message);
@@ -239,6 +282,53 @@ export default function ProjectDetailsPage() {
         </div>
       </div>
 
+      {deploymentNotice ? (
+        <div
+          className={`mb-6 rounded-2xl border p-4 shadow-xl ${
+            deploymentNotice.variant === "success"
+              ? "border-emerald-500/30 bg-emerald-500/10"
+              : "border-sky-500/30 bg-sky-500/10"
+          }`}
+        >
+          <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+            <div className="flex items-start gap-3">
+              <CheckCircle2
+                className={`mt-0.5 h-5 w-5 ${
+                  deploymentNotice.variant === "success" ? "text-emerald-300" : "text-sky-300"
+                }`}
+              />
+              <div>
+                <p className="text-sm font-semibold text-white">{deploymentNotice.title}</p>
+                <p className="mt-1 text-sm text-gray-300">{deploymentNotice.message}</p>
+                <p className="mt-2 text-xs text-gray-400">
+                  <span className="text-gray-500">App:</span> {deploymentNotice.appName}
+                </p>
+                <div className="mt-3 flex flex-wrap items-center gap-2">
+                  <a
+                    href={deploymentNotice.url}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="inline-flex items-center gap-2 rounded-md border border-white/10 bg-white/5 px-3 py-2 text-xs font-medium text-white transition-colors hover:bg-white/10"
+                  >
+                    Open app
+                    <ExternalLink className="h-3.5 w-3.5" />
+                  </a>
+                  <button
+                    type="button"
+                    onClick={() => void copyText(deploymentNotice.url, "url")}
+                    className="inline-flex items-center gap-2 rounded-md border border-white/10 bg-black/20 px-3 py-2 text-xs font-medium text-gray-200 transition-colors hover:bg-black/30"
+                  >
+                    <Copy className="h-3.5 w-3.5" />
+                    {copiedField === "url" ? "Copied URL" : "Copy URL"}
+                  </button>
+                  <span className="break-all text-xs text-gray-400">{deploymentNotice.url}</span>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
       <div className="mb-6 flex flex-wrap gap-2">
         <button
           onClick={() => setTab("overview")}
@@ -287,7 +377,20 @@ export default function ProjectDetailsPage() {
             <span className="text-gray-500">Repository:</span> {project?.repoUrl || "—"}
           </p>
           <p className="text-sm text-gray-300">
-            <span className="text-gray-500">Project URL:</span> {project?.url || "—"}
+            <span className="text-gray-500">Project URL:</span>{" "}
+            {project?.url ? (
+              <a
+                href={project.url}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="inline-flex items-center gap-1 text-emerald-300 hover:text-emerald-200 hover:underline"
+              >
+                {project.url}
+                <ExternalLink className="h-3.5 w-3.5" />
+              </a>
+            ) : (
+              "—"
+            )}
           </p>
           <p className="text-sm text-gray-300">
             <span className="text-gray-500">Workspace ID:</span> {project?.workspaceId || "—"}

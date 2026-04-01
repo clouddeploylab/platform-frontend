@@ -6,8 +6,8 @@ import { useSession } from "next-auth/react";
 import Link from "next/link";
 import { AppDispatch, RootState } from "@/store";
 import { fetchProjectsStart, fetchProjectsSuccess, fetchProjectsFailure } from "@/store/projectSlice";
-import { getUserProjects, setProjectAutoDeploy, syncProjectDeploy } from "@/lib/api";
-import { ExternalLink, RefreshCw, Activity, CheckCircle2, XCircle, Clock } from "lucide-react";
+import { getUserProjects, setProjectAutoDeploy, syncProjectDeploy, ProjectResult } from "@/lib/api";
+import { ExternalLink, RefreshCw, Activity, CheckCircle2, XCircle, Clock, Copy } from "lucide-react";
 
 type SessionWithBackendToken = {
   backendToken?: string | null;
@@ -21,6 +21,16 @@ type JenkinsWsMessage = {
   message?: string;
   detail?: string;
 };
+
+type DeploymentNotice = {
+  appName: string;
+  title: string;
+  message: string;
+  url: string;
+  variant: "info" | "success";
+};
+
+type ProjectSummary = Pick<ProjectResult, "appName" | "status" | "url">;
 
 const backendBaseUrl = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8080";
 
@@ -56,6 +66,8 @@ export default function Projects() {
   const [streamError, setStreamError] = useState<string | null>(null);
   const [currentQueueItem, setCurrentQueueItem] = useState<number | null>(null);
   const [currentBuildNumber, setCurrentBuildNumber] = useState<number | null>(null);
+  const [deploymentNotice, setDeploymentNotice] = useState<DeploymentNotice | null>(null);
+  const [copiedDeploymentUrl, setCopiedDeploymentUrl] = useState(false);
   const streamRef = useRef<WebSocket | null>(null);
   const logContainerRef = useRef<HTMLPreElement | null>(null);
   const backendToken = (session as SessionWithBackendToken | null)?.backendToken ?? null;
@@ -69,9 +81,11 @@ export default function Projects() {
     try {
       const data = await getUserProjects(backendToken);
       dispatch(fetchProjectsSuccess(data));
+      return data;
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : "Failed to load deployments";
       dispatch(fetchProjectsFailure(message));
+      return null;
     }
   }, [backendToken, dispatch]);
 
@@ -96,6 +110,16 @@ export default function Projects() {
     }
     logContainerRef.current.scrollTop = logContainerRef.current.scrollHeight;
   }, [logOutput]);
+
+  async function copyDeploymentUrl(url: string) {
+    try {
+      await navigator.clipboard.writeText(url);
+      setCopiedDeploymentUrl(true);
+      window.setTimeout(() => setCopiedDeploymentUrl(false), 1500);
+    } catch {
+      setCopiedDeploymentUrl(false);
+    }
+  }
 
   function stopStreaming() {
     if (streamRef.current) {
@@ -187,7 +211,7 @@ export default function Projects() {
     };
   }
 
-  function startQueueStreaming(job: string, queueItemId: number) {
+  function startQueueStreaming(job: string, queueItemId: number, project?: ProjectSummary | null) {
     if (!backendToken) {
       setStreamError("Missing backend token. Please sign in again.");
       return;
@@ -232,7 +256,20 @@ export default function Projects() {
             return;
           case "done":
             setIsStreaming(false);
-            setStreamStatus("Build completed.");
+            setStreamStatus("Build completed. Your app domain is ready to open.");
+            if (project?.url) {
+              setDeploymentNotice({
+                appName: project.appName,
+                title: `${project.appName} deployment finished`,
+                message:
+                  project.status === "DEPLOYED"
+                    ? "The deployment is live. Open the domain below to access it."
+                    : "The pipeline finished. Open the domain below to access your app.",
+                url: project.url,
+                variant: "success",
+              });
+            }
+            void loadProjects();
             socket.close(1000, "Log stream completed");
             return;
           default:
@@ -282,11 +319,27 @@ export default function Projects() {
 
     try {
       setSyncingProjectId(projectId);
+      setDeploymentNotice(null);
+      setCopiedDeploymentUrl(false);
       const result = await syncProjectDeploy(backendToken, projectId);
+      const currentProject = projects.find((project) => project.id === projectId) ?? null;
       await loadProjects();
 
+      if (currentProject?.url) {
+        setDeploymentNotice({
+          appName: currentProject.appName,
+          title: `${currentProject.appName} domain ready`,
+          message:
+            result.queueItemId && result.queueItemId > 0
+              ? "Deployment queued. Keep this domain for when the pipeline completes."
+              : "Deployment started. Open the domain below once the pipeline finishes.",
+          url: currentProject.url,
+          variant: "info",
+        });
+      }
+
       if (result.queueItemId && result.queueItemId > 0) {
-        startQueueStreaming(result.jobName || jobName, result.queueItemId);
+        startQueueStreaming(result.jobName || jobName, result.queueItemId, currentProject);
       } else {
         setStreamError("Sync started, but queue item ID is missing.");
         setStreamStatus("Sync started without queue item.");
@@ -341,6 +394,60 @@ export default function Projects() {
           {loading ? "Syncing..." : "Sync"}
         </button>
       </div>
+
+      {deploymentNotice ? (
+        <div
+          className={`mb-6 rounded-2xl border p-4 shadow-xl ${
+            deploymentNotice.variant === "success"
+              ? "border-emerald-500/30 bg-emerald-500/10"
+              : "border-sky-500/30 bg-sky-500/10"
+          }`}
+        >
+          <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+            <div className="flex items-start gap-3">
+              <CheckCircle2
+                className={`mt-0.5 h-5 w-5 ${
+                  deploymentNotice.variant === "success" ? "text-emerald-300" : "text-sky-300"
+                }`}
+              />
+              <div>
+                <p className="text-sm font-semibold text-white">{deploymentNotice.title}</p>
+                <p className="mt-1 text-sm text-gray-300">{deploymentNotice.message}</p>
+                <p className="mt-2 text-xs text-gray-400">
+                  <span className="text-gray-500">App:</span> {deploymentNotice.appName}
+                </p>
+                <div className="mt-3 flex flex-wrap items-center gap-2">
+                  <a
+                    href={deploymentNotice.url}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="inline-flex items-center gap-2 rounded-md border border-white/10 bg-white/5 px-3 py-2 text-xs font-medium text-white transition-colors hover:bg-white/10"
+                  >
+                    Open app
+                    <ExternalLink className="h-3.5 w-3.5" />
+                  </a>
+                  <button
+                    type="button"
+                    onClick={() => void copyDeploymentUrl(deploymentNotice.url)}
+                    className="inline-flex items-center gap-2 rounded-md border border-white/10 bg-black/20 px-3 py-2 text-xs font-medium text-gray-200 transition-colors hover:bg-black/30"
+                  >
+                    <Copy className="h-3.5 w-3.5" />
+                    {copiedDeploymentUrl ? "Copied URL" : "Copy URL"}
+                  </button>
+                  <span className="break-all text-xs text-gray-400">{deploymentNotice.url}</span>
+                </div>
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={() => setDeploymentNotice(null)}
+              className="text-xs text-gray-400 transition-colors hover:text-white"
+            >
+              Dismiss
+            </button>
+          </div>
+        </div>
+      ) : null}
 
       <div className="bg-[#111] border border-white/10 rounded-xl overflow-hidden shadow-2xl">
         {error ? (
